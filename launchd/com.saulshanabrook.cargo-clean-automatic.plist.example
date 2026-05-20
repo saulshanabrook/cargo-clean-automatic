@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.saulshanabrook.cargo-clean-automatic</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/saul/p/cargo-clean-automatic/bin/cargo-clean-automatic</string>
+    <string>--root</string>
+    <string>/Users/saul</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/saul/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/saul/Library/Logs/cargo-clean-automatic/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/saul/Library/Logs/cargo-clean-automatic/launchd.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,284 @@
+#!/bin/zsh
+set -u
+setopt pipefail
+
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+label="Cargo Clean Automatic"
+dry_run=0
+popup=1
+min_size_mib=0
+log_dir="$HOME/Library/Logs/cargo-clean-automatic"
+typeset -a roots
+typeset -a excludes
+
+usage() {
+  cat <<'EOF'
+Usage: cargo-clean-automatic [OPTIONS]
+
+Find every top-level Cargo target directory under the configured roots and run:
+
+  cargo clean --manifest-path <repo>/Cargo.toml
+
+Options:
+  --root DIR          Root directory to scan. May be repeated. Defaults to $HOME.
+  --exclude DIR       Directory subtree to skip. May be repeated.
+  --min-size-mib N    Only clean target dirs at least N MiB. Defaults to 0.
+  --log-dir DIR       Directory for timestamped logs.
+  --dry-run           Report what would be cleaned without deleting anything.
+  --popup             Show a macOS popup and notification. Default.
+  --no-popup          Do not show popup/notification.
+  -h, --help          Show this help.
+
+Environment:
+  CARGO_CLEAN_ROOTS          Colon-separated root list used when --root is omitted.
+  CARGO_CLEAN_MIN_SIZE_MIB   Default value for --min-size-mib.
+  CARGO_CLEAN_POPUP          0 disables popup/notification.
+EOF
+}
+
+die() {
+  print -u2 -- "$1"
+  exit 1
+}
+
+format_kib() {
+  local kib="$1"
+  awk -v kib="$kib" 'BEGIN {
+    if (kib >= 1024 * 1024) {
+      printf "%.1f GiB", kib / 1024 / 1024
+    } else if (kib >= 1024) {
+      printf "%.1f MiB", kib / 1024
+    } else {
+      printf "%d KiB", kib
+    }
+  }'
+}
+
+target_kib() {
+  local target="$1"
+  if [[ -d "$target" ]]; then
+    du -sk "$target" 2>/dev/null | awk '{print $1}'
+  else
+    print -- 0
+  fi
+}
+
+show_popup() {
+  local title="$1"
+  local subtitle="$2"
+  local message="$3"
+
+  if [[ "$popup" != 1 ]] || ! command -v osascript >/dev/null 2>&1; then
+    return 0
+  fi
+
+  /usr/bin/osascript \
+    -e 'on run argv' \
+    -e 'set titleText to item 1 of argv' \
+    -e 'set subtitleText to item 2 of argv' \
+    -e 'set messageText to item 3 of argv' \
+    -e 'display notification messageText with title titleText subtitle subtitleText' \
+    -e 'display dialog messageText buttons {"OK"} default button "OK" with title titleText giving up after 30' \
+    -e 'end run' \
+    "$title" "$subtitle" "$message" >/dev/null 2>&1 || true
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root)
+      [[ $# -ge 2 ]] || die "--root requires a directory"
+      roots+=("$2")
+      shift 2
+      ;;
+    --exclude)
+      [[ $# -ge 2 ]] || die "--exclude requires a directory"
+      excludes+=("$2")
+      shift 2
+      ;;
+    --min-size-mib)
+      [[ $# -ge 2 ]] || die "--min-size-mib requires a number"
+      min_size_mib="$2"
+      shift 2
+      ;;
+    --log-dir)
+      [[ $# -ge 2 ]] || die "--log-dir requires a directory"
+      log_dir="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    --popup)
+      popup=1
+      shift
+      ;;
+    --no-popup)
+      popup=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+if [[ -n "${CARGO_CLEAN_MIN_SIZE_MIB:-}" && "$min_size_mib" == 0 ]]; then
+  min_size_mib="$CARGO_CLEAN_MIN_SIZE_MIB"
+fi
+
+if [[ -n "${CARGO_CLEAN_POPUP:-}" && "$CARGO_CLEAN_POPUP" == 0 ]]; then
+  popup=0
+fi
+
+if [[ ${#roots[@]} -eq 0 ]]; then
+  if [[ -n "${CARGO_CLEAN_ROOTS:-}" ]]; then
+    roots=("${(@s/:/)CARGO_CLEAN_ROOTS}")
+  else
+    roots=("$HOME")
+  fi
+fi
+
+excludes+=(
+  "$HOME/Library"
+  "$HOME/.cargo/registry"
+  "$HOME/.rustup"
+  "$HOME/.cache"
+  "$HOME/go/pkg/mod"
+  "$HOME/Library/CloudStorage"
+  "$HOME/Library/Mobile Documents"
+  "$HOME/.Trash"
+)
+
+command -v cargo >/dev/null 2>&1 || die "cargo not found on PATH=$PATH"
+
+mkdir -p "$log_dir" || die "could not create log dir: $log_dir"
+timestamp="$(date +%Y%m%d-%H%M%S)"
+log_file="$log_dir/$timestamp.log"
+exec > >(tee -a "$log_file") 2>&1
+
+print -- "$label"
+print -- "Started: $(date)"
+print -- "Mode: $([[ "$dry_run" == 1 ]] && print dry-run || print clean)"
+print -- "Roots:"
+for root in "${roots[@]}"; do
+  print -- "  $root"
+done
+print -- ""
+
+typeset -A seen_targets
+typeset -a targets
+
+for root in "${roots[@]}"; do
+  [[ -d "$root" ]] || continue
+
+  find_args=("$root")
+  if [[ ${#excludes[@]} -gt 0 ]]; then
+    find_args+=("(")
+    local_first=1
+    for excluded in "${excludes[@]}"; do
+      [[ -n "$excluded" ]] || continue
+      if [[ "$local_first" == 0 ]]; then
+        find_args+=("-o")
+      fi
+      find_args+=("-path" "$excluded")
+      local_first=0
+    done
+    find_args+=(")" "-prune" "-o")
+  fi
+  find_args+=("-type" "d" "-name" "target" "-print0")
+
+  while IFS= read -r -d $'\0' target; do
+    [[ -n "${seen_targets[$target]:-}" ]] && continue
+    seen_targets[$target]=1
+    repo="${target:h}"
+    manifest="$repo/Cargo.toml"
+    [[ -f "$manifest" ]] || continue
+    targets+=("$target")
+  done < <(find "${find_args[@]}" 2>/dev/null)
+done
+
+if [[ ${#targets[@]} -eq 0 ]]; then
+  message="No top-level Cargo target directories found. Log: $log_file"
+  print -- "$message"
+  show_popup "$label" "No cleanup needed" "$message"
+  exit 0
+fi
+
+min_size_kib=$((min_size_mib * 1024))
+cleaned=0
+skipped=0
+failed=0
+before_total=0
+after_total=0
+
+for target in "${targets[@]}"; do
+  repo="${target:h}"
+  manifest="$repo/Cargo.toml"
+  before="$(target_kib "$target")"
+
+  if (( before < min_size_kib )); then
+    skipped=$((skipped + 1))
+    print -- "SKIP small $(format_kib "$before") $target"
+    continue
+  fi
+
+  before_total=$((before_total + before))
+
+  if [[ "$dry_run" == 1 ]]; then
+    cleaned=$((cleaned + 1))
+    after_total=$((after_total + before))
+    print -- "WOULD CLEAN $(format_kib "$before") $manifest"
+    continue
+  fi
+
+  print -- "CLEAN $(format_kib "$before") $manifest"
+  if cargo clean --manifest-path "$manifest"; then
+    after="$(target_kib "$target")"
+    after_total=$((after_total + after))
+    freed=$((before - after))
+    cleaned=$((cleaned + 1))
+    print -- "DONE freed $(format_kib "$freed") from $target"
+  else
+    failed=$((failed + 1))
+    after="$(target_kib "$target")"
+    after_total=$((after_total + after))
+    print -- "FAIL $manifest"
+  fi
+done
+
+freed_total=$((before_total - after_total))
+if (( freed_total < 0 )); then
+  freed_total=0
+fi
+
+print -- ""
+print -- "Finished: $(date)"
+print -- "Cleaned: $cleaned"
+print -- "Skipped: $skipped"
+print -- "Failed: $failed"
+if [[ "$dry_run" == 1 ]]; then
+  print -- "Would clean: $(format_kib "$before_total")"
+else
+  print -- "Freed: $(format_kib "$freed_total")"
+fi
+print -- "Log: $log_file"
+
+if [[ "$dry_run" == 1 ]]; then
+  subtitle="Dry run: $cleaned targets"
+  message="Would clean $(format_kib "$before_total") across $cleaned Cargo target directories. Skipped: $skipped. Log: $log_file"
+else
+  subtitle="Freed $(format_kib "$freed_total")"
+  message="Cleaned $cleaned Cargo target directories. Freed: $(format_kib "$freed_total"). Failed: $failed. Skipped: $skipped. Log: $log_file"
+fi
+
+show_popup "$label" "$subtitle" "$message"
+
+if (( failed > 0 )); then
+  exit 1
+fi
