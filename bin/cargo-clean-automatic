@@ -4,6 +4,15 @@ setopt pipefail
 
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+# Explicit completion has its own narrow, preview-first lifecycle.
+for argument in "$@"; do
+  case "$argument" in
+    --project|--project=*|--finished|--test-cache-root|--test-cache-root=*)
+      exec python3 "${0:A:h}/finish_experiment.py" "$@"
+      ;;
+  esac
+done
+
 label="Cargo Clean Automatic"
 dry_run=0
 popup=1
@@ -15,6 +24,7 @@ typeset -a excludes
 usage() {
   cat <<'EOF'
 Usage: cargo-clean-automatic [OPTIONS]
+       cargo-clean-automatic --project DIR --finished [--clean] [--test-cache-root DIR]
 
 Find every top-level Cargo target directory under the configured roots and run:
 
